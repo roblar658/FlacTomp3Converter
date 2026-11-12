@@ -1,8 +1,8 @@
 """
-Automatisk test-suite for egenlaget FLAC -> MP3 kompilator og visualiseringer.
-Genererer ekte .flac testfiler, kompilerer dem med vår Python3-kompilator,
-verifiserer at alle 7 steg-visualiseringer + HTML blir laget, og dekoder
-MP3-resultatet med soundfile (libmpg123) for å kontrollere lydkvalitet.
+Automated test suite for the custom Python 3 FLAC-to-MP3 compiler and visualizer.
+Generates real .flac test files, compiles them using our custom encoder,
+verifies that all 7 step PNGs + HTML report are produced, and decodes the
+resulting MP3 via soundfile (libmpg123) to verify signal fidelity.
 """
 
 import os
@@ -11,7 +11,6 @@ import unittest
 import numpy as np
 import soundfile as sf
 
-from flac_decoder import decode_flac
 from flac2mp3 import compile_flac_to_mp3
 
 
@@ -20,10 +19,8 @@ class TestCustomMp3Compiler(unittest.TestCase):
         sr = 44100
         dur = 1.5
         t = np.arange(int(sr * dur)) / sr
-        # Rik stereo-akkord + høyfrekvent overtone for å aktivere mange bånd
         left = 0.40 * np.sin(2 * np.pi * 440.0 * t) + 0.25 * np.sin(2 * np.pi * 1318.5 * t) + 0.12 * np.sin(2 * np.pi * 5200.0 * t)
         right = 0.38 * np.sin(2 * np.pi * 554.37 * t) + 0.22 * np.cos(2 * np.pi * 2637.0 * t) + 0.10 * np.sin(2 * np.pi * 8800.0 * t)
-        # Fade in/out for pen overgang
         env = np.minimum(1.0, np.minimum(t / 0.05, (dur - t) / 0.05))
         pcm_in = np.stack([left * env, right * env], axis=1)
 
@@ -33,7 +30,7 @@ class TestCustomMp3Compiler(unittest.TestCase):
             vis_dir = os.path.join(tmp, "vis")
 
             sf.write(flac_path, pcm_in, sr, subtype="PCM_16")
-            out_mp3, stats, vis_info = compile_flac_to_mp3(
+            out_mp3, _stats, vis_info = compile_flac_to_mp3(
                 flac_path,
                 mp3_path,
                 bitrate_kbps=192,
@@ -51,12 +48,11 @@ class TestCustomMp3Compiler(unittest.TestCase):
                 self.assertTrue(os.path.isfile(p))
                 self.assertGreater(os.path.getsize(p), 5000)
 
-            # Verifiser at standard MP3-dekoder (libsndfile/libmpg123) dekoder filen korrekt
+            # Verify decoding with an independent MP3 decoder (libsndfile/libmpg123)
             dec, dsr = sf.read(out_mp3)
             self.assertEqual(dsr, 44100)
             self.assertEqual(dec.shape[1], 2)
 
-            # Juster for MP3 filterbank+MDCT-forsinkelse (~1057 samples)
             ref0 = pcm_in[8000:50000, 0]
             corrs0 = [np.corrcoef(ref0, dec[8000 + d:50000 + d, 0])[0, 1] for d in range(1000, 1120)]
             best_corr0 = max(corrs0)
@@ -83,7 +79,7 @@ class TestCustomMp3Compiler(unittest.TestCase):
             peak1 = freqs1[np.argmax(np.abs(np.fft.rfft(dec1)))]
             self.assertAlmostEqual(peak1, 1000.0, delta=5.0)
 
-            # 2) Resampling fra 22050 Hz -> 44100 Hz MPEG-1 MP3
+            # 2) Resampling from 22050 Hz -> 44100 Hz MPEG-1 MP3
             sr2 = 22050
             t2 = np.arange(int(sr2 * 0.8)) / sr2
             x2 = 0.45 * np.sin(2 * np.pi * 660.0 * t2)
@@ -100,4 +96,3 @@ class TestCustomMp3Compiler(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-

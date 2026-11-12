@@ -1,8 +1,8 @@
 """
-Ren Python 3 FLAC-dekoder (RFC 9639 / native FLAC).
-Bruker ingen eksterne lydbiblioteker — leser FLAC-metadata, dekoder
-CONSTANT, VERBATIM, FIXED (0-4) og LPC (1-32) delrammer med Rice-koding,
-og utforer kanal-dekorrelasjon (L/S, R/S, M/S) til normalisert PCM.
+Pure Python 3 native FLAC decoder (RFC 9639).
+Uses zero external audio libraries — parses FLAC metadata blocks, decodes
+CONSTANT, VERBATIM, FIXED (0-4), and LPC (1-32) subframes with Rice coding,
+and performs stereo channel decorrelation (L/S, R/S, M/S) to normalized PCM.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ class FlacMetadata:
 
 
 class BitReader:
-    """Rask bitleser over bytes med 64-bits buffer."""
+    """Fast MSB-first bit reader over bytes using an integer accumulator."""
 
     def __init__(self, data: bytes, pos: int = 0) -> None:
         self.data = data
@@ -89,7 +89,7 @@ class BitReader:
         if self.bits < n:
             self._fill(n)
             if self.bits < n:
-                raise EOFError("Uventet slutt på FLAC-bitstrøm")
+                raise EOFError("Unexpected end of FLAC bitstream")
         shift = self.bits - n
         val = (self.buf >> shift) & ((1 << n) - 1)
         self.bits = shift
@@ -104,12 +104,12 @@ class BitReader:
         return val
 
     def read_unary_zeros(self) -> int:
-        """Leser antall 0-bits før neste 1-bit."""
+        """Reads the count of leading 0 bits before the terminating 1 bit."""
         zeros = 0
         while True:
             if self.bits == 0:
                 if self.byte_pos >= self.length:
-                    raise EOFError("Uventet slutt under unary-lesing")
+                    raise EOFError("Unexpected end of stream during unary read")
                 b = self.data[self.byte_pos]
                 self.byte_pos += 1
                 if b == 0:
@@ -121,11 +121,11 @@ class BitReader:
                 zeros += self.bits
                 self.bits = 0
                 continue
-            # Finn høyeste satte bit i self.buf
+            # Locate highest set bit in self.buf
             bl = self.buf.bit_length()
             leading_zeros = self.bits - bl
             zeros += leading_zeros
-            # Konsumer leading_zeros + 1 bit
+            # Consume leading_zeros + 1 bit
             rem = bl - 1
             self.bits = rem
             self.buf &= (1 << rem) - 1
@@ -136,7 +136,6 @@ class BitReader:
         if drop:
             self.bits -= drop
             self.buf &= (1 << self.bits) - 1
-        # Skyv ubrukte hele bytes tilbake til byte_pos
         while self.bits >= 8:
             self.bits -= 8
             self.byte_pos -= 1
@@ -147,7 +146,7 @@ class BitReader:
         self.align_to_byte()
         end = self.byte_pos + n
         if end > self.length:
-            raise EOFError("Uventet slutt ved lesing av bytes")
+            raise EOFError("Unexpected end of stream while reading bytes")
         out = self.data[self.byte_pos:end]
         self.byte_pos = end
         return out
@@ -156,14 +155,13 @@ class BitReader:
         first = self.read_bits(8)
         if (first & 0x80) == 0:
             return first
-        # Tell ledende 1-ere
         ones = 0
         mask = 0x80
         while first & mask:
             ones += 1
             mask >>= 1
         if ones < 2 or ones > 7:
-            raise ValueError(f"Ugyldig UTF-8-kodet FLAC-nummer: {first:#x}")
+            raise ValueError(f"Invalid UTF-8 coded FLAC number: {first:#x}")
         val = first & ((1 << (7 - ones)) - 1)
         for _ in range(ones - 1):
             cont = self.read_bits(8)
@@ -177,7 +175,7 @@ class BitReader:
 def _decode_residual(br: BitReader, blocksize: int, predictor_order: int) -> List[int]:
     method = br.read_bits(2)
     if method > 1:
-        raise ValueError(f"Ikke-støttet FLAC residual-metode: {method}")
+        raise ValueError(f"Unsupported FLAC residual coding method: {method}")
     param_bits = 4 if method == 0 else 5
     escape_val = (1 << param_bits) - 1
 
@@ -219,7 +217,7 @@ def _decode_subframe(
 ) -> Tuple[List[int], str]:
     zero_pad = br.read_bits(1)
     if zero_pad != 0:
-        raise ValueError("Ugyldig FLAC delramme-padding (forventet 0)")
+        raise ValueError("Invalid FLAC subframe padding bit (expected 0)")
 
     sub_type = br.read_bits(6)
     wasted_flag = br.read_bits(1)
@@ -229,16 +227,13 @@ def _decode_subframe(
     eff_bps = bps - wasted_bits
 
     if sub_type == 0:
-        # CONSTANT
         val = br.read_signed(eff_bps)
         samples = [val] * blocksize
         kind = "CONSTANT"
     elif sub_type == 1:
-        # VERBATIM
         samples = [br.read_signed(eff_bps) for _ in range(blocksize)]
         kind = "VERBATIM"
     elif 8 <= sub_type <= 12:
-        # FIXED
         order = sub_type - 8
         samples = [br.read_signed(eff_bps) for _ in range(order)]
         res = _decode_residual(br, blocksize, order)
@@ -269,18 +264,16 @@ def _decode_subframe(
                 s4, s3, s2, s1 = s3, s2, s1, cur
         kind = f"FIXED({order})"
     elif 32 <= sub_type <= 63:
-        # LPC
         order = sub_type - 31
         samples = [br.read_signed(eff_bps) for _ in range(order)]
         prec = br.read_bits(4) + 1
         if prec == 16:
-            raise ValueError("Reservert QLP-koeffisientpresisjon (16)")
+            raise ValueError("Reserved QLP coefficient precision (16)")
         qlp_shift = br.read_signed(5)
         coeffs = [br.read_signed(prec) for _ in range(order)]
         res = _decode_residual(br, blocksize, order)
 
-        # Rask indre løkke for LPC-prediksjon
-        for i, r in enumerate(res):
+        for r in res:
             idx = len(samples)
             acc = 0
             for j in range(order):
@@ -288,7 +281,7 @@ def _decode_subframe(
             samples.append((acc >> qlp_shift) + r)
         kind = f"LPC({order})"
     else:
-        raise ValueError(f"Ugyldig FLAC delramme-type: {sub_type}")
+        raise ValueError(f"Invalid FLAC subframe type: {sub_type}")
 
     if wasted_bits > 0:
         samples = [s << wasted_bits for s in samples]
@@ -322,23 +315,23 @@ def _parse_vorbis_comments(raw: bytes) -> Dict[str, str]:
 
 def decode_flac(path: str) -> Tuple[np.ndarray, FlacMetadata]:
     """
-    Dekoder en .flac-fil fullstendig i Python 3.
-    Returnerer:
-        pcm: numpy float64-array med form (num_samples, channels) i [-1.0, 1.0]
-        metadata: FlacMetadata med strøm-info og ramme-statistikk for visualisering
+    Decodes a native .flac file completely in Python 3.
+    Returns:
+        pcm: numpy float64 array with shape (num_samples, channels) in [-1.0, 1.0]
+        metadata: FlacMetadata with stream info and frame statistics for visualization
     """
     with open(path, "rb") as f:
         data = f.read()
 
     pos = 0
-    # Hopp over eventuell ID3v2-header før fLaC-magisk ord
+    # Skip optional ID3v2 header before the fLaC marker
     if data[:3] == b"ID3" and len(data) >= 10:
         s = data[6:10]
         id3_size = ((s[0] & 0x7F) << 21) | ((s[1] & 0x7F) << 14) | ((s[2] & 0x7F) << 7) | (s[3] & 0x7F)
         pos = 10 + id3_size
 
     if data[pos:pos + 4] != b"fLaC":
-        raise ValueError("Filen er ikke en gyldig native FLAC-fil (mangler 'fLaC'-header)")
+        raise ValueError("File is not a valid native FLAC file (missing 'fLaC' marker)")
     pos += 4
 
     streaminfo: Optional[FlacMetadata] = None
@@ -346,7 +339,7 @@ def decode_flac(path: str) -> Tuple[np.ndarray, FlacMetadata]:
 
     while True:
         if pos + 4 > len(data):
-            raise EOFError("Ufullstendig FLAC metadata-blokk")
+            raise EOFError("Truncated FLAC metadata block")
         header = data[pos]
         is_last = bool(header & 0x80)
         block_type = header & 0x7F
@@ -384,7 +377,7 @@ def decode_flac(path: str) -> Tuple[np.ndarray, FlacMetadata]:
             break
 
     if streaminfo is None:
-        raise ValueError("FLAC-filen mangler STREAMINFO-blokk")
+        raise ValueError("FLAC file is missing STREAMINFO metadata block")
     streaminfo.vorbis_comments = vorbis_comments
 
     br = BitReader(data, pos)
@@ -394,7 +387,7 @@ def decode_flac(path: str) -> Tuple[np.ndarray, FlacMetadata]:
     while br.has_more():
         sync = br.read_bits(14)
         if sync != 0x3FFE:
-            raise ValueError(f"Mistet FLAC-rammesynk ved ramme {frame_idx}: {sync:#x}")
+            raise ValueError(f"Lost FLAC frame sync at frame {frame_idx}: {sync:#x}")
         _reserved = br.read_bits(1)
         _blocking_strategy = br.read_bits(1)
 
@@ -413,7 +406,7 @@ def decode_flac(path: str) -> Tuple[np.ndarray, FlacMetadata]:
         elif bs_code in _BLOCKSIZE_TABLE:
             blocksize = _BLOCKSIZE_TABLE[bs_code]
         else:
-            raise ValueError(f"Ugyldig blokkstørrelse-kode: {bs_code}")
+            raise ValueError(f"Invalid blocksize code: {bs_code}")
 
         if sr_code == 0:
             sample_rate = streaminfo.sample_rate
@@ -426,7 +419,7 @@ def decode_flac(path: str) -> Tuple[np.ndarray, FlacMetadata]:
         elif sr_code in _SAMPLERATE_TABLE:
             sample_rate = _SAMPLERATE_TABLE[sr_code]
         else:
-            raise ValueError(f"Ugyldig sample rate-kode: {sr_code}")
+            raise ValueError(f"Invalid sample rate code: {sr_code}")
 
         bps = streaminfo.bits_per_sample if bps_code == 0 else _BPS_TABLE[bps_code]
         _crc8 = br.read_bits(8)
@@ -441,7 +434,7 @@ def decode_flac(path: str) -> Tuple[np.ndarray, FlacMetadata]:
             else:  # Right/Side or Mid/Side
                 sub_bps_list = [bps + 1 if ch_assign == 9 else bps, bps + 1]
         else:
-            raise ValueError(f"Reservert kanaltilordning: {ch_assign}")
+            raise ValueError(f"Reserved channel assignment: {ch_assign}")
 
         subframes = []
         sub_kinds = []
@@ -450,7 +443,7 @@ def decode_flac(path: str) -> Tuple[np.ndarray, FlacMetadata]:
             subframes.append(sf_samples)
             sub_kinds.append(sf_kind)
 
-        # Kanal-dekorrelasjon for stereo
+        # Stereo channel decorrelation
         if ch_assign == 8:  # Left / Side
             left = subframes[0]
             side = subframes[1]
