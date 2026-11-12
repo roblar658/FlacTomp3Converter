@@ -48,12 +48,23 @@ python test_mp3_compiler.py
 A FLAC frame stores lossless audio as a **linear prediction** plus a **Rice-coded residual** $e[n]$:
 
 1. **Zigzag & Rice Entropy Decoding:** Unsigned folded values $u = (q \ll r) \mid b$ (unary quotient $q$ and $r$-bit remainder $b$) map back to signed residuals:
-   $$e[n] = (u \gg 1) \oplus -(u \bmod 2)$$
-2. **Linear Prediction (`FIXED` / `LPC`):**
-   - For order-$p$ LPC with quantized coefficients $a_j$ and right-shift $S_{\text{qlp}}$:
-     $$x[n] = \left\lfloor \frac{\sum_{j=1}^{p} a_j \, x[n - j]}{2^{S_{\text{qlp}}}} \right\rfloor + e[n]$$
+
+$$
+e[n] = (u \gg 1) \oplus -(u \bmod 2)
+$$
+
+2. **Linear Prediction (`FIXED` / `LPC`):** For order-$p$ LPC with quantized coefficients $a[j]$ and right-shift `qlp_shift` ($Q$):
+
+$$
+x[n] = \left\lfloor \frac{\sum_{j=1}^{p} a[j] \cdot x[n - j]}{2^{Q}} \right\rfloor + e[n]
+$$
+
 3. **Stereo Decorrelation:** Mid/Side channels $(M, S)$ are reconstructed bit-exactly via:
-   $$M' = 2M + (S \bmod 2), \qquad L = \left\lfloor \frac{M' + S}{2} \right\rfloor, \qquad R = \left\lfloor \frac{M' - S}{2} \right\rfloor$$
+
+$$
+M' = 2M + (S \bmod 2), \qquad L = \left\lfloor \frac{M' + S}{2} \right\rfloor, \qquad R = \left\lfloor \frac{M' - S}{2} \right\rfloor
+$$
+
 4. Samples are normalized to $x[n] \in [-1, 1]$ and grouped into MP3 frames of $1152$ samples ($2$ granules of $576$ samples each).
 
 ---
@@ -64,9 +75,13 @@ A FLAC frame stores lossless audio as a **linear prediction** plus a **Rice-code
 
 For every $32$ new PCM samples shifted into a $512$-sample FIFO buffer $X[0..511]$ (with $X[0]$ newest), the encoder applies the ISO/IEC 11172-3 512-tap prototype low-pass window $C[i]$ (`ENWINDOW`), folds into 64 polyphase components, and modulates into 32 uniform frequency subbands $k \in \{0, \dots, 31\}$:
 
-$$Z[i] = C[i] \cdot X[i], \qquad Y[j] = \sum_{m=0}^{7} Z[j + 64m] \quad (j = 0, \dots, 63)$$
+$$
+Z[i] = C[i] \cdot X[i], \qquad Y[j] = \sum_{m=0}^{7} Z[j + 64m] \quad (j = 0, \dots, 63)
+$$
 
-$$S[k] = \sum_{j=0}^{63} Y[j] \cos\left(\frac{(2k + 1)(j - 16)\pi}{64}\right)$$
+$$
+S[k] = \sum_{j=0}^{63} Y[j] \cos\left(\frac{(2k + 1)(j - 16)\pi}{64}\right)
+$$
 
 Repeating this 18 times per granule produces an $18 \times 32$ time-frequency subband matrix per channel.
 
@@ -76,12 +91,27 @@ Repeating this 18 times per granule produces an $18 \times 32$ time-frequency su
 
 ![Step 3: MDCT and Forward Aliasing Reduction](demo_output_visualization/step_3_mdct_and_aliasing.png)
 
-To achieve fine spectral resolution (576 lines instead of 32), each subband $k$ combines $18$ slots from the previous granule and $18$ slots from the current granule ($N = 36$) after odd-subband time-slot sign inversion ($S_{k, s} \leftarrow (-1)^{(k \bmod 2)(s \bmod 2)} S_{k, s}$).
+To achieve fine spectral resolution (576 lines instead of 32), each subband $k$ combines $18$ slots from the previous granule and $18$ slots from the current granule ($N = 36$) after odd-subband time-slot sign inversion:
 
-1. **Windowed Princen–Bradley MDCT:** With the $36$-point sine window $w[n] = \sin\!\left(\frac{\pi}{36}(n + \tfrac{1}{2})\right)$ (satisfying the TDAC condition $w[n]^2 + w[n+18]^2 = 1$), the 18 MDCT spectral coefficients for subband $k$ are:
-   $$X_k[m] = \frac{1}{9} \sum_{n=0}^{35} x_k[n]\, w[n] \cos\left(\frac{\pi}{72}(2n + 19)(2m + 1)\right), \qquad m \in \{0, \dots, 17\}$$
-2. **Forward Aliasing Reduction Butterflies:** Because the 32 polyphase subbands overlap, adjacent subbands $k$ and $k+1$ exhibit spectral aliasing across the 8 boundary lines ($i = 0, \dots, 7$). Given ISO coefficients $c_i$, $cs_i = \frac{1}{\sqrt{1+c_i^2}}$, $ca_i = \frac{c_i}{\sqrt{1+c_i^2}}$, the encoder applies the orthogonal inverse of the decoder's butterfly rotation:
-   $$\begin{bmatrix} X'_{k}[17 - i] \\ X'_{k+1}[i] \end{bmatrix} = \begin{bmatrix} cs_i & ca_i \\ -ca_i & cs_i \end{bmatrix} \begin{bmatrix} X_{k}[17 - i] \\ X_{k+1}[i] \end{bmatrix}$$
+$$
+S[k, s] \leftarrow (-1)^{(k \bmod 2)(s \bmod 2)} S[k, s]
+$$
+
+1. **Windowed Princen–Bradley MDCT:** With the $36$-point sine window $w[n] = \sin\left(\frac{\pi}{36}(n + \frac{1}{2})\right)$ (satisfying the TDAC condition $w[n]^2 + w[n+18]^2 = 1$), the 18 MDCT spectral coefficients for subband $k$ are:
+
+$$
+X_k[m] = \frac{1}{9} \sum_{n=0}^{35} x_k[n] w[n] \cos\left(\frac{\pi}{72}(2n + 19)(2m + 1)\right), \qquad m \in \{0, \dots, 17\}
+$$
+
+2. **Forward Aliasing Reduction Butterflies:** Because the 32 polyphase subbands overlap, adjacent subbands $k$ and $k+1$ exhibit spectral aliasing across the 8 boundary lines ($i = 0, \dots, 7$). Given ISO coefficients $c[i]$, the encoder applies the orthogonal inverse of the decoder's butterfly rotation:
+
+$$
+cs_i = \frac{1}{\sqrt{1+c[i]^2}}, \qquad ca_i = \frac{c[i]}{\sqrt{1+c[i]^2}}
+$$
+
+$$
+\begin{bmatrix} X'_{k}[17 - i] \\ X'_{k+1}[i] \end{bmatrix} = \begin{bmatrix} cs_i & ca_i \\ -ca_i & cs_i \end{bmatrix} \begin{bmatrix} X_{k}[17 - i] \\ X_{k+1}[i] \end{bmatrix}
+$$
 
 ---
 
@@ -92,12 +122,24 @@ To achieve fine spectral resolution (576 lines instead of 32), each subband $k$ 
 A 1024-point Hann-windowed FFT estimates the power spectrum and tonality of each granule, while MDCT line energies are summed across the 21 ISO scalefactor bands $b \in \{0, \dots, 20\}$:
 
 1. **Bark Critical-Band Mapping:**
-   $$z(f) = 13 \arctan(0.00076 f) + 3.5 \arctan\!\left(\left(\frac{f}{7500}\right)^2\right)$$
+
+$$
+z(f) = 13 \arctan(0.00076 f) + 3.5 \arctan\left(\left(\frac{f}{7500}\right)^2\right)
+$$
+
 2. **Absolute Threshold of Hearing (Terhardt, 1979):**
-   $$\text{ATH}(f_{\text{kHz}}) = 3.64 f_{\text{kHz}}^{-0.8} - 6.5 e^{-0.6 (f_{\text{kHz}} - 3.3)^2} + 10^{-3} f_{\text{kHz}}^{4} \quad [\text{dB SPL}]$$
-3. **Schroeder Spreading & Masking Threshold:** Energy spreads across critical bands $\Delta z = z_j - z_i$ via:
-   $$S_{\text{dB}}(\Delta z) = 15.81 + 7.5(\Delta z + 0.474) - 17.5\sqrt{1 + (\Delta z + 0.474)^2}$$
-   Combined with the Spectral Flatness Measure $\text{SFM} = \frac{\exp(\mathbb{E}[\ln P])}{\mathbb{E}[P]}$ to distinguish tonal maskers from noise-like signals, any quantization error below the resulting masking threshold $T[b]$ is masked by the human auditory system.
+
+$$
+\mathrm{ATH}(f) = 3.64 f_{\mathrm{kHz}}^{-0.8} - 6.5 e^{-0.6 (f_{\mathrm{kHz}} - 3.3)^2} + 10^{-3} f_{\mathrm{kHz}}^{4} \quad [\mathrm{dB\ SPL}]
+$$
+
+3. **Schroeder Spreading & Masking Threshold:** Energy spreads across critical-band distances $\Delta z = z[j] - z[i]$ via:
+
+$$
+S_{\mathrm{dB}}(\Delta z) = 15.81 + 7.5(\Delta z + 0.474) - 17.5\sqrt{1 + (\Delta z + 0.474)^2}
+$$
+
+Combined with the Spectral Flatness Measure $\mathrm{SFM} = \frac{\exp(\mathbb{E}[\ln P])}{\mathbb{E}[P]}$ to distinguish tonal maskers from noise-like signals, any quantization error below the resulting masking threshold $T[b]$ is masked by the human auditory system.
 
 ---
 
@@ -105,15 +147,19 @@ A 1024-point Hann-windowed FFT estimates the power spectrum and tonality of each
 
 ![Step 5: Non-Linear Quantization and Rate-Distortion Loop](demo_output_visualization/step_5_quantization_and_rd.png)
 
-MPEG-1 Layer III uses non-uniform power-law companding so relative quantization precision remains roughly constant across quiet and loud spectral lines:
+MPEG-1 Layer III uses non-uniform power-law companding so relative quantization precision remains roughly constant across quiet and loud spectral lines. Let $g$ denote `global_gain`, $s$ denote `scalefac_scale`, $p$ denote `preflag`, and $\mathrm{sf}[b]$ denote `scalefac_l[b]`:
 
-$$\Delta_b = \text{global\_gain} - 210 - 2^{1 + \text{scalefac\_scale}}\bigl(\text{scalefac}_l[b] + \text{preflag}\cdot\text{pretab}[b]\bigr)$$
+$$
+\Delta_b = g - 210 - 2^{1 + s}\left(\mathrm{sf}[b] + p \cdot \mathrm{pretab}[b]\right)
+$$
 
-$$|ix[i]| = \left\lfloor \left(\frac{|xr[i]|}{2^{\Delta_b / 4}}\right)^{3/4} + 0.4054 \right\rfloor, \qquad \widehat{xr}[i] = \operatorname{sgn}(ix[i]) \cdot |ix[i]|^{4/3} \cdot 2^{\Delta_b / 4}$$
+$$
+|ix[i]| = \left\lfloor \left(\frac{|xr[i]|}{2^{\Delta_b / 4}}\right)^{3/4} + 0.4054 \right\rfloor, \qquad \widehat{xr}[i] = \mathrm{sgn}(ix[i]) \cdot |ix[i]|^{4/3} \cdot 2^{\Delta_b / 4}
+$$
 
 Two nested optimization loops control bitrate and perceptual distortion:
-- **Inner Loop (Rate Control):** Binary search on $\text{global\_gain} \in [0, 255]$ so that `part2_bits + huffman_bits` fits within the granule bit budget ($\le 4095$ bits).
-- **Outer Loop (Distortion Control):** Computes per-band noise $D_b = \sum_{i \in b} (xr[i] - \widehat{xr}[i])^2$ and increases $\text{scalefac}_l[b]$ for bands where the Noise-to-Mask Ratio $D_b / T[b] > 1$, then re-runs the inner loop.
+- **Inner Loop (Rate Control):** Binary search on `global_gain` ($g \in [0, 255]$) so that `part2_bits + huffman_bits` fits within the granule bit budget ($\le 4095$ bits).
+- **Outer Loop (Distortion Control):** Computes per-band noise $D[b] = \sum_{i \in b} (xr[i] - \widehat{xr}[i])^2$ and increases `scalefac_l[b]` for bands where the Noise-to-Mask Ratio $D[b] / T[b] > 1$, then re-runs the inner loop.
 
 ---
 
@@ -126,9 +172,11 @@ The 576 quantized integers are ordered from low to high frequencies and split in
 2. **`count1`:** Trailing quadruples with entries in $\{-1, 0, +1\}$, coded with Table A (32) or Table B (33).
 3. **`rzero`:** All remaining high-frequency zeros up to index 575, coded with **0 bits**.
 
-To handle transient frames without violating Constant Bitrate (CBR), unused bytes from simpler frames accumulate in a **bit reservoir** (`main_data_begin`, up to 511 bytes):
+To handle transient frames without violating Constant Bitrate (CBR), unused bytes from simpler frames accumulate in a **bit reservoir** (`main_data_begin`, up to 511 bytes), where $\mathrm{slot}[f]$ is available slot bytes and $\mathrm{main}[f]$ is main data bytes written in frame $f$:
 
-$$R_{f+1} = R_f + \text{slot\_bytes}_f - \text{main\_bytes}_f, \qquad 0 \le R_f \le 511$$
+$$
+R[f+1] = R[f] + \mathrm{slot}[f] - \mathrm{main}[f], \qquad 0 \le R[f] \le 511
+$$
 
 ---
 
@@ -138,10 +186,14 @@ $$R_{f+1} = R_f + \text{slot\_bytes}_f - \text{main\_bytes}_f, \qquad 0 \le R_f 
 
 Each MPEG-1 Layer III frame has an exact byte size determined by bitrate $B$ (bps), sample rate $f_s$ (Hz), and padding bit $p \in \{0, 1\}$:
 
-$$\text{frame\_bytes} = \left\lfloor \frac{144 \cdot B}{f_s} \right\rfloor + p$$
+$$
+N_{\mathrm{frame}} = \left\lfloor \frac{144 \cdot B}{f_s} \right\rfloor + p
+$$
 
 Per-frame spectral Signal-to-Noise Ratio is measured as:
 
-$$\text{SNR}_{\text{dB}} = 10 \log_{10} \left( \frac{\sum_{i=0}^{575} xr[i]^2}{\sum_{i=0}^{575} \bigl(xr[i] - \widehat{xr}[i]\bigr)^2} \right)$$
+$$
+\mathrm{SNR}_{\mathrm{dB}} = 10 \log_{10} \left( \frac{\sum_{i=0}^{575} xr[i]^2}{\sum_{i=0}^{575} \left(xr[i] - \widehat{xr}[i]\right)^2} \right)
+$$
 
 On the included `demo_input.flac` (2.00 s, 44.1 kHz stereo), encoding at 192 kbps achieves a **7.2x** compression ratio over raw 16-bit PCM (**344.5 KB** PCM &rarr; **123.5 KB** FLAC &rarr; **47.8 KB** MP3) with an average spectral SNR of **70.2 dB**.
